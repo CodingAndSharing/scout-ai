@@ -158,8 +158,9 @@ class TestChatAgentMetaProvenance < Test::Unit::TestCase
 
   def test_malformed_receipts_become_agent_job_warnings
     TmpFile.with_dir do |dir|
-      # Output indexes after the doubled inline user line: b1 -> 3, b2 -> 5,
-      # b3 -> 7.
+      # Output message indexes in the parsed chat (no leading empty user
+      # message since Chat.parse stopped emitting it): b1 -> 2, b2 -> 4,
+      # b3 -> 6.
       chat = write_chat(dir, 'bad.chat',
                         receipt_chat_text(
                           {'b1' => 'not-an-array',
@@ -196,14 +197,14 @@ class TestChatAgentMetaProvenance < Test::Unit::TestCase
       # Indexed entries keep their evidence address; the whole-value failure
       # does not have one.
       not_an_array = errors.find { |_e, _k, _o, _r, ref| ref[:reason] == :not_an_array }
-      assert_equal [chat, 3], not_an_array.last[:output_address]
+      assert_equal [chat, 2], not_an_array.last[:output_address]
       assert_nil not_an_array.last[:evidence_address]
       assert_nil not_an_array.last[:agent_meta_index]
       invalid_role = errors.find { |_e, _k, _o, _r, ref| ref[:reason] == :invalid_role }
-      assert_equal [chat, 5, :agent_meta, 0], invalid_role.last[:evidence_address]
+      assert_equal [chat, 4, :agent_meta, 0], invalid_role.last[:evidence_address]
       assert_equal 0, invalid_role.last[:agent_meta_index]
-      unparseable = errors.find { |_e, _k, _o, _r, ref| ref[:reason] == :unparseable_meta && ref[:output_address] == [chat, 5] }
-      assert_equal [chat, 5, :agent_meta, 1], unparseable.last[:evidence_address]
+      unparseable = errors.find { |_e, _k, _o, _r, ref| ref[:reason] == :unparseable_meta && ref[:output_address] == [chat, 4] }
+      assert_equal [chat, 4, :agent_meta, 1], unparseable.last[:evidence_address]
 
       # Nothing malformed was silently used as provenance.
       assert_equal 1, visits.length
@@ -263,7 +264,7 @@ TXT
       unresolved = errors.collect(&:last).select { |ref| ref[:reason] == :unresolved_job_reference }
       assert_equal 1, unresolved.length
       assert_equal missing, unresolved.first[:reference]
-      assert_equal [chat, 3, :agent_meta, 0], unresolved.first[:evidence_address]
+      assert_equal [chat, 2, :agent_meta, 0], unresolved.first[:evidence_address]
       assert_equal 'u1', unresolved.first[:call_id]
       assert_equal 'ask', unresolved.first[:tool_name]
 
@@ -337,6 +338,111 @@ TXT
       Chat.traverse_provenance(plain, on_error: ->(*args) { errors << args }).to_a
 
       assert_empty errors
+    end
+  end
+
+  ## Chats with a .files sidecar are scanned like jobs
+
+  def test_saved_chat_sidecar_society_chats_are_traversed_with_log_relation
+    TmpFile.with_dir do |dir|
+      chat = write_chat(dir, 'saved.chat',
+                        "user: hi\nmeta: pt=2 ct=1 tt=3 inference_id=s0\nassistant: done\n")
+
+      sidecar = File.expand_path(chat + '.files/log/society/Worker/default')
+      FileUtils.mkdir_p(sidecar)
+      File.write(File.join(sidecar, 'agent.chat'),
+                 "user: work\nmeta: pt=10 ct=5 tt=15 inference_id=w1\nassistant: ok\n")
+
+      errors = []
+      visits = Chat.traverse_provenance(chat, on_error: ->(*args) { errors << args }).to_a
+
+      assert_empty errors
+
+      society = visits.find do |_kind, object, _pk, _parent, _relation, _first|
+        object.to_s.end_with?('log/society/Worker/default/agent.chat')
+      end
+      assert society, 'society chat not visited'
+      kind, object, parent_kind, parent, relation, first = society
+      assert_equal :chat, kind
+      assert_equal File.expand_path(File.join(sidecar, 'agent.chat')), object.to_s
+      assert_equal :chat, parent_kind
+      assert_equal File.expand_path(chat), parent.to_s
+      assert_equal :log, relation
+      assert first
+    end
+  end
+
+  def test_saved_chat_sidecar_root_copy_is_not_traversed
+    TmpFile.with_dir do |dir|
+      chat = write_chat(dir, 'saved.chat',
+                        "user: hi\nmeta: pt=2 ct=1 tt=3 inference_id=s0\nassistant: done\n")
+
+      log = File.expand_path(chat + '.files/log')
+      FileUtils.mkdir_p(File.join(log, 'society/Worker/default'))
+      # The full-copy written by the CLI save mechanism: same content as root.
+      File.write(File.join(log, 'agent.chat'),
+                 "user: hi\nmeta: pt=2 ct=1 tt=3 inference_id=s0\nassistant: done\n")
+      File.write(File.join(log, 'society/Worker/default/agent.chat'),
+                 "user: work\nmeta: pt=10 ct=5 tt=15 inference_id=w1\nassistant: ok\n")
+
+      visits = Chat.traverse_provenance(chat).to_a
+      paths = visits.collect { |_k, object, _pk, _p, _r, _f| object.to_s }
+
+      root_copy = File.join(log, 'agent.chat')
+      assert_not_include paths, root_copy,
+                          'the sidecar root copy must not become its own node'
+      assert_include paths, File.join(log, 'society/Worker/default/agent.chat')
+
+      # No chat -> root-copy edge either.
+      edges = Chat.provenance_edges(chat).collect { |e| [e[:from].to_s, e[:to].to_s, e[:relation]] }
+      assert_empty edges.select { |from, to, _r| to == root_copy }
+    end
+  end
+
+  def test_saved_chat_sidecar_visits_are_unique_and_repeateable
+    TmpFile.with_dir do |dir|
+      chat = write_chat(dir, 'saved.chat',
+                        "user: hi\nmeta: pt=2 ct=1 tt=3 inference_id=s0\nassistant: done\n")
+
+      log = File.expand_path(chat + '.files/log')
+      FileUtils.mkdir_p(File.join(log, 'society/Worker/default'))
+      FileUtils.mkdir_p(File.join(log, 'society/Critic/default'))
+      File.write(File.join(log, 'agent.chat'),
+                 "user: hi\nmeta: pt=2 ct=1 tt=3 inference_id=s0\nassistant: done\n")
+      File.write(File.join(log, 'society/Worker/default/agent.chat'),
+                 "user: work\nmeta: pt=10 ct=5 tt=15 inference_id=w1\nassistant: ok\n")
+      File.write(File.join(log, 'society/Critic/default/agent.chat'),
+                 "user: check\nmeta: pt=4 ct=2 tt=6 inference_id=c1\nassistant: fine\n")
+
+      keys = nil
+      2.times do
+        visits = Chat.traverse_provenance(chat).to_a
+        keys_now = visits.collect { |kind, object, _pk, _p, _r, _f| [kind, object.to_s] }
+        keys = keys_now if keys.nil?
+        assert_equal keys, keys_now, 'traversal is not deterministic'
+        assert_equal keys_now.length, keys_now.uniq.length,
+                     'a file reachable via several globs produced duplicate visits'
+      end
+    end
+  end
+
+  def test_job_log_relation_still_traverses_agent_chat_from_the_job
+    TmpFile.with_dir do |dir|
+      _parent, worker, _critic, _dep = fixture_c(dir)
+
+      log = Path.setup(File.expand_path(File.join(worker.to_s + '.files', 'log')))
+      log_chat = File.join(log.to_s, 'agent.chat')
+      assert File.file?(log_chat), 'fixture did not create the job log chat'
+
+      visits = Chat.traverse_provenance(worker, root_type: :job).to_a
+      log_file = visits.find do |_kind, object, _pk, _parent, relation, _first|
+        relation == :log && object.to_s == File.expand_path(log_chat)
+      end
+
+      assert log_file, 'job log/agent.chat was not traversed from the job'
+      assert_equal :chat, log_file[0]
+      assert_equal :job, log_file[2]
+      assert_equal File.expand_path(worker.to_s), File.expand_path(log_file[3].path.to_s)
     end
   end
 

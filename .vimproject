@@ -61,85 +61,9 @@ scout-ai=$PWD filter="*.rb *.rake Rakefile *.rdoc *.R *.sh *.js *.haml *.sass *.
     }
    }
   }
-
-  huggingface
-
-  test_huggingface
-
-  SGLang
-
-  observatory.rb
-
-  token_count
-  token_count.patch
-  token_count.info
-
-  introduce
-
-  socialize
-
-  socialize.test
-
-  meta
-
-  meta.tool_call
-
-  meta.work
-  meta.revise
-  meta.info
-  meta.chat_analyst
-  meta.plots
-
-  meta.test
-  mechanisms_analysis
-
-  prov.test
-
-  prompt.test
-  prompt.test.clear
-  prompt.test.full
-
-  ask_agents
-
-  test_job
-
-  test_return_path
-
-  documentation
-
-  promot_strategies
-
-  provenance_and_accounting
-
-  test.meta
-
-  parse_meta
-
-  fix_info
-
-  read_job
-
-  repeated_tool_calls
-
-  provenance
-  provenance.2
-  provenance.3
-
-  analysis.themes
-  analysis.themes.2
-  analysis.themes.3
-
-  allow.test
-  
-  test.ggoss
-
-  ask_meta
-
-  ask_meta_critic
-
-  rake_tests
+  save_locations
  }
-lib=lib {
+ lib=lib {
   scout-ai.rb
   scout=scout{
    network=network{
@@ -160,9 +84,9 @@ lib=lib {
      parse.rb
      persist.rb
      process.rb
-     prompt.rb
      provenance.rb
      tool_calls.rb
+     prompt.rb
      prompt=prompt{
       shorten_tools.rb
       shorten_tools_epoch.rb
@@ -183,9 +107,11 @@ lib=lib {
      workflow.rb
     }
     backends=backends{
+     default.rb
+
+     glm.rb
      anthropic.rb
      bedrock.rb
-     default.rb
      huggingface.rb
      ollama.rb
      openai.rb
@@ -199,6 +125,7 @@ lib=lib {
      chat.rb
      delegate.rb
      iterate.rb
+     save.rb
      workflow.rb
     }
    }

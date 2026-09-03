@@ -38,10 +38,10 @@ evidence = options.delete(:evidence)
 filename = ARGV.first
 raise MissingParameterException, :filename if filename.nil?
 
-# A persisted Step normally has an info sidecar and may have a files directory.
-# Chat files outside Workflow storage have neither. Explicitly loading the Step
-# after this evidence check avoids treating every readable chat as a job.
-job_evidence = Open.exists?(filename + '.info') || Open.exists?(filename + '.files')
+# A persisted Step always has an info sidecar. A .files directory alone is NOT
+# evidence: saved agent chats carry one too. Explicitly loading the Step after
+# this evidence check avoids treating every readable chat as a job.
+job_evidence = Open.exists?(filename + '.info')
 root_type = job_evidence ? :job : :chat
 root = root_type == :job ? Step.load(filename) : Path.setup(File.expand_path(filename))
 warnings = []
@@ -178,14 +178,21 @@ node_tokens = component ? direct_tokens : aggregate_tokens
 # ------------------------------------------------------------------
 # Hidden nodes are skipped entirely — not printed and not traversed.
 #   - result-relation chats: they duplicate the job node and create cycles
-#   - top-level agent.chat log file (log/agent.chat): its cost is subsumed
-#     by the parent job.  Sub-agent conversations in nested directories
-#     (e.g. log/worker-theme_1/agent.chat) are real independent inferences
+#   - top-level agent.chat log file: its cost is subsumed by the parent job.
+#     ScoutCoder: DUAL-LAYOUT. The root copy of the agent conversation sits
+#     directly under the files dir in BOTH layouts:
+#       new     <job>.files/agent.chat
+#       legacy  <job>.files/log/agent.chat
+#     Any basename agent.chat whose parent is a `<something>.files` directory
+#     (top level of the files dir) or the legacy `.../log` directory is such a
+#     copy.  NESTED society chats (agent.society/<agent>/<conv>/agent.chat,
+#     log/society/<agent>/<conv>/agent.chat) are real independent inferences
 #     and must be shown.
 def top_level_agent_chat?(path)
   return false unless File.basename(path) == 'agent.chat'
   parent = File.dirname(path)
-  parent.end_with?('/log') || parent.end_with?('/log/')
+  parent.end_with?('/log') || parent.end_with?('/log/') ||
+    parent.end_with?('.files')
 end
 
 def hidden_node?(node, relation)
@@ -218,7 +225,14 @@ def report_line(kind, label, tokens, offset: 0)
 end
 
 def job_short_id(path)
-  File.basename(path).sub(/^Default_/, '')[0, 8]
+  basename = File.basename(path)
+
+  parts = basename.split('_')
+  if parts.length == 2 && parts.last.length > 10
+    parts.last[0,8]
+  else
+    basename
+  end
 end
 
 def node_label(node, parent_node = nil, root_key = nil, key = nil, long = false)
@@ -236,6 +250,14 @@ def node_label(node, parent_node = nil, root_key = nil, key = nil, long = false)
     # symlink-resolution mismatches between the Step object and node path.
     parent_log_dir = File.join(parent_node[:path] + ".files", "log")
     rel = Misc.path_relative_to(parent_log_dir, path)
+    rel.nil? || rel.empty? ? File.basename(path) : rel
+  elsif parent_node && parent_node[:kind] == :job && path.include?(parent_node[:path] + '.files/')
+    # ScoutCoder: DUAL-LAYOUT sibling of the legacy branch above.  Log chat
+    # under a job in the NEW layout (no log/ component): show the path
+    # relative to the job's files dir, so
+    # agent.society/Direct/harness_test/agent.chat is shown shortened.
+    parent_files_dir = parent_node[:path] + '.files'
+    rel = Misc.path_relative_to(parent_files_dir, path)
     rel.nil? || rel.empty? ? File.basename(path) : rel
   elsif key == root_key && node[:kind] == :chat
     # Root chat: show basename
@@ -440,8 +462,8 @@ if evidence
     return '' unless Array === address && address.any?
     rest = address[1..-1]
     base = address[0].nil? ? '?' : File.basename(address[0].to_s)
-    if rest.length >= 3 && rest[1] == :agent_meta
-      "#{base}:#{rest[0]}[agent_meta,#{rest[2]}]"
+    if rest.length >= 3 && (rest[1] == :agent_meta || rest[1] == :meta)
+      "#{base}:#{rest[0]}[#{rest[1]},#{rest[2]}]"
     else
       "#{base}:#{rest[0]}"
     end

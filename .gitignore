@@ -23,3 +23,5 @@ Dockerfile
 
 .github/skills
 pixi.toml
+var
+sandbox

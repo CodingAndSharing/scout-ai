@@ -91,13 +91,20 @@ There are other jobs found in this chat:
   end
 
   helper :log_agent do |agent, agent_name=nil|
-    dir = agent_name ? file('log')[agent_name] : file('log')
-
-    agent.chats.each do |name, other|
-      dir.society[name].set_extension('chat').write other.current_chat.print
-    end if agent.chats
-
-    dir['agent.chat'].write agent.current_chat.print
+    # Delegate to the Agent#save machinery so every path that saves an agent
+    # (chat_task jobs, CLI, plain agent.save) writes the identical canonical
+    # layout: this agent's FULL chat at <files_dir>/<agent_name>.chat and
+    # every nested conversation under
+    # <files_dir>/<agent_name>.society/<agent>/<conversation>/agent.chat.
+    #
+    # ScoutCoder: the save_file MUST be assigned BEFORE the first chat/start
+    # call (chat_task does it for us here, but any caller must too): the
+    # Agent#chat ensure-hook and the restart-snapshot hook in Agent#start
+    # both write through save_file, so assigning it late loses the
+    # intermediate turns. `agent_name` defaults to 'agent' and names the
+    # file, never a directory: worker.chat -> worker.society, no log/ level.
+    agent.save_file = files_dir["#{agent_name || 'agent'}.chat"] if agent.save_file.nil?
+    agent.save
 
     update_info :dependencies, dependencies.collect { |dependency| dependency.path.find }
     agent
@@ -109,6 +116,9 @@ module Workflow
     input :chat, :text, 'Chat in Scout-AI chat-file format'
     task task_name => :chat do |chat|
       begin
+        # No eager mkdir: directories appear lazily when the save machinery
+        # (or any other writer) actually produces a file under files_dir.
+        Chat.allow_path files_dir
         response = self.instance_exec(&block)
 
         result = if LLM::Agent === response

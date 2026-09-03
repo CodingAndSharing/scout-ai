@@ -11,9 +11,9 @@ module LLM
 
   def self.ask(question, options = {}, &block)
     messages = LLM.chat(question)
-    options = IndiferentHash.add_defaults LLM.options(messages), options
+    options = IndiferentHash.add_defaults options, LLM.options(messages)
 
-    endpoint, persist = IndiferentHash.process_options options, :endpoint, :persist, persist: true
+    endpoint, persist, agent_save_file = IndiferentHash.process_options options, :endpoint, :persist, :agent_save_file, persist: true
 
     persist ||= Scout::Config.get :persist, :ask, :llm, env: 'ASK_PERSIST,LLM_PERSIST,PERSIST'
     endpoint ||= Scout::Config.get :endpoint, :ask, :llm, env: 'ASK_ENDPOINT,LLM_ENDPOINT,ENDPOINT,LLM,ASK'
@@ -28,8 +28,9 @@ module LLM
     if agent_name
       options[:endpoint] ||= endpoint
       agent = LLM::Agent.load_agent agent_name
+      agent.save_file = agent_save_file if agent_save_file
       agent.follow messages
-      res = agent.ask options
+      res = agent.chat options
       return res
     end
 
@@ -105,6 +106,9 @@ module LLM
       when :bedrock, "bedrock"
         require_relative 'backends/bedrock'
         LLM::Bedrock.ask(messages, options, &block)
+      when :glm, "glm"
+        require_relative 'backends/glm'
+        LLM::GLM.ask(messages, options, &block)
       else
         mod = BACKENDS[backend]
         raise "Unknown backend: #{backend}" if mod.nil?

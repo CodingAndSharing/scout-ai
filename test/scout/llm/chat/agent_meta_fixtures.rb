@@ -40,8 +40,9 @@ module AgentMetaFixtures
   # are call ids, values are the agent_meta payloads (Arrays, Strings, ...).
   # `extra` lines are appended after the receipts (e.g. local meta lines).
   #
-  # Message indexes produced by Chat.parse (inline user line is doubled):
-  #   0 user, 1 user, then per receipt: function_call, function_call_output.
+  # Message indexes produced by Chat.parse (single user turn, no leading
+  # empty user message since 49c0d20):
+  #   0 user, then per receipt: function_call, function_call_output.
   def receipt_chat_text(receipts, extra: nil)
     lines = ['user: Run the worker']
     receipts.each do |call_id, agent_meta|
@@ -60,14 +61,15 @@ module AgentMetaFixtures
   end
 
   # Create a job layout under `dir` for the relative reference `ref`
-  # (e.g. 'Worker/ask/Default_w'): the result file, an optional .info sidecar
-  # with `dependencies` (absolute paths), and log chats written under
-  # `<job>.files/log/<name>` (Hash name -> chat text).  Returns the job path.
+  # (e.g. 'Worker/ask/Default_w'): the result file, a .info sidecar with
+  # `dependencies` (always written, matching scout-gear Step), and log chats
+  # written under `<job>.files/log/<name>` (Hash name -> chat text).  Returns
+  # the job path.
   def make_job(dir, ref, result: 'answer', dependencies: [], logs: {})
     path = File.expand_path(File.join(dir, ref))
     FileUtils.mkdir_p(File.dirname(path))
     File.write(path, result)
-    File.write(path + '.info', {dependencies: dependencies}.to_json) if dependencies.any?
+    File.write(path + '.info', {dependencies: dependencies}.to_json)
     logs.each do |name, text|
       log_path = File.join(path + '.files', 'log', name)
       FileUtils.mkdir_p(File.dirname(log_path))

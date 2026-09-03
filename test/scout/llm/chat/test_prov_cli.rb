@@ -82,6 +82,41 @@ class TestProvCLI < Test::Unit::TestCase
     end
   end
 
+  def test_saved_chat_with_files_sidecar_is_not_a_job
+    TmpFile.with_dir do |dir|
+      # A saved agent chat carries a .files sidecar but no .info sidecar: it
+      # must be rendered as a chat root, never loaded as a Step.
+      saved = write_chat(dir, 'saved.chat',
+                         "user: hi\nmeta: pt=1 ct=1 tt=2 inference_id=s1\nassistant: done\n")
+      society_chat = File.join(saved + '.files', 'log', 'society', 'Worker', 'default', 'agent.chat')
+      FileUtils.mkdir_p(File.dirname(society_chat))
+      File.write(society_chat,
+                 "user: work\nmeta: pt=5 ct=2 tt=7 inference_id=s2\nassistant: ok\n")
+      assert !File.exist?(saved + '.info')
+
+      out, err, status = prov(saved)
+      assert status.success?, "prov must not blow up on a .files-only chat\n#{err}"
+
+      # Root classification: the rendered root is the chat itself, not a job
+      # node. Its aggregate now includes the society conversation in the
+      # sidecar (2 + 7 = 9), because chats with a .files sidecar are scanned
+      # for socialized agent conversations just like jobs.
+      root_line = out.lines.find { |line| line.include?('saved.chat') && !line.include?('.files') }
+      assert root_line, out
+      assert_match(/\A\s*chat\b/, root_line, out)
+      assert_not_match(/\A\s*job\b/, root_line, out)
+      assert_include root_line, 'total=9', out
+      assert_include root_line, 'prompt=6', out
+
+      # The society conversation is traversed and rendered as its own node.
+      society_line = out.lines.find { |line| line.include?('log/society/Worker/default/agent.chat') }
+      assert society_line, out
+      assert_match(/\A\s*chat\b/, society_line, out)
+      assert_include society_line, 'total=7', out
+      assert_include society_line, 'prompt=5', out
+    end
+  end
+
   def test_evidence_lists_events_addresses_and_call_ids
     TmpFile.with_dir do |dir|
       parent, _worker = fixture_b(dir)
@@ -97,8 +132,8 @@ class TestProvCLI < Test::Unit::TestCase
       end
 
       # Receipt evidence keeps its parent output address and call id.
-      assert_match(/agent_meta parent\.chat:3\[agent_meta,0\] call=a1/, out)
-      assert_match(/agent_meta parent\.chat:3\[agent_meta,1\] call=a1/, out)
+      assert_match(/agent_meta parent\.chat:2\[agent_meta,0\] call=a1/, out)
+      assert_match(/agent_meta parent\.chat:2\[agent_meta,1\] call=a1/, out)
 
       # Chat-side evidence for the merged events.
       assert_match(/chat_meta agent\.chat:3/, out)
@@ -119,11 +154,11 @@ class TestProvCLI < Test::Unit::TestCase
       assert status.success?
 
       # Worker is reached through a receipt (relation :agent_job) ...
-      assert_match(/delegated-job w\b/, out)
+      assert_match(/delegated-job (Default_)?w\b/, out)
       # ... while the Critic, referenced by an ordinary local meta job= line
       # (relation :job), keeps the plain job rendering.
-      assert_match(/^\s*job\s+c\b/, out)
-      assert_not_match(/delegated-job c\b/, out)
+      assert_match(/^\s*job\s+(Default_)?c\b/, out)
+      assert_not_match(/delegated-job (Default_)?c\b/, out)
 
       # Delegated usage of the parent chat is annotated once.
       assert_equal 1, out.lines.count { |line| line.include?('delegated receipt:') }
@@ -231,7 +266,7 @@ class TestProvCLI < Test::Unit::TestCase
       assert status.success?
       # Legacy receipt events show their receipt location instead of the raw
       # address array, and they are flagged as possibly overcounted.
-      assert_match(/receipt=legacy\.chat:3\[agent_meta,0\]/, out)
+      assert_match(/receipt=legacy\.chat:2\[agent_meta,0\]/, out)
       assert_include out, 'legacy unresolved'
       assert_not_include out, 'receipt=["', out
     end

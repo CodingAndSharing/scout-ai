@@ -84,8 +84,10 @@ module LLM
 
           job = workflow.job(:ask, chat: Chat.print(messages))
           self.job = job
+          Open.mkdir job.files_dir
           Chat.allow_job job
           job.clean if ENV['SCOUT_NO_ASK_CACHE'] == 'true'
+          job.recursive_clean if ENV['SCOUT_NO_ASK_CACHE'] == 'recursive'
           job.produce
           
           messages = Chat.project(job.short_path, LLM.chat(job.path))
@@ -128,7 +130,7 @@ module LLM
           end
         else
           begin
-            self.save_state
+            self.save if self.save_file
           rescue
             Log.exception $!
           ensure
@@ -136,9 +138,6 @@ module LLM
           end
         end
       end
-    end
-
-    def save_state
     end
 
     def prompt(messages, options = {})
@@ -220,4 +219,5 @@ end
 require_relative 'agent/chat'
 require_relative 'agent/iterate'
 require_relative 'agent/delegate'
+require_relative 'agent/save'
 require_relative 'agent/workflow'

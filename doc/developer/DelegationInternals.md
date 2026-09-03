@@ -81,6 +81,48 @@ Live specialist instances are stored in `@chats`, keyed by `"agent_name/conversa
 Conversation keys are **scoped by agent**: `Worker/work_A` and
 `Critic/work_A` are independent conversations.
 
+### Persisted society layout
+
+Live conversations are also mirrored to disk, but **lazily**: nothing is
+created until an agent actually saves. `Agent#save` decides the canonical
+location from the save target of the *parent* agent:
+
+- The root chat saved at `p.chat` produces a society tree rooted at
+  `p.chat.files/agent.society/<agent_name>/<conversation>/agent.chat`
+  (named agents use `<name>.society`, e.g. `worker.society`).
+- A nested chat already stored at
+  `.../society/<a>/<c>/<file>` makes the society of *its* children the
+  **sibling** directory `.../society/<a>/<c>/society/...`. A nested
+  `agent.chat` never grows a second `.files` tree of its own. Only the
+  depth-0 society directory is named after the chat (`<name>.society`);
+  every deeper level keeps the plain `society` basename.
+- `chat_task` jobs and the `scout-ai agent ask` CLI always write the agent's
+  own chat at `<chat_or_job_path>.files/<name>.chat`: `agent.chat` for an
+  unnamed/`agent` agent, `worker.chat`/`critic.chat` for named ones.
+- For a persisted **chat** root that file is a full copy of the root
+  conversation; provenance scanning of the sidecar excludes exactly that
+  top-level copy, while the society conversations under
+  `<chat>.files/<name>.society/<agent_name>/<conversation>/agent.chat` are
+  included even though they are also named `agent.chat`. Job roots keep
+  their own top-level `<name>.chat` as a normal log node (renderers hide
+  it), and the `:log` relation covers exactly
+  `*.files/*.chat`, `*.files/*.society/**/*.chat` and the legacy
+  `*.files/log/**/*.chat`, so `resets/` snapshots stay out.
+
+**Legacy layout (read-only).** Older scout-ai wrote
+`<chat>.files/log/agent.chat` and the society tree under
+`<chat>.files/log/society/<agent_name>/<conversation>/agent.chat`. Nothing
+writes there anymore, old files are never migrated, and provenance
+traversal still globs `log/**/*.chat` so chats saved by those versions
+remain visible.
+
+An agent with no live society writes only its own chat file and creates no
+`.files` tree at all; parent directories are created on demand by
+`Open.sensible_write`. Children get their `save_file` assigned during a
+parent save, so later independent child turns keep auto-saving in place.
+Saves are cycle-safe (visited paths + seen agents + a depth limit of 32) and
+non-fatal: a failure is logged as a warning and the run continues.
+
 ### `load_chat` — get-or-create
 
 ```ruby
@@ -177,14 +219,16 @@ caller to the specialist.
 
 ### Delegated inference receipts
 
-When a delegation tool returns an `LLM::Agent`, `LLM.process_calls`
-serializes the child agent's `meta` messages into the parent
-`function_call_output` envelope as an `agent_meta` array. These receipts are
-provenance evidence, not parent-chat messages: the child's inference metadata
-and producer job reference are read from the paired tool output and never
-injected into the parent chat. Provenance tooling consumes them through
-`Chat.agent_meta_evidence` and the `:agent_job` relation; see
-[Provenance.md](Provenance.md) for the extraction and accounting rules.
+When a delegation tool returns an `LLM::Agent`, `LLM.process_calls` embeds
+the child agent's `meta` messages in the parent `function_call_output`
+envelope under the `meta` key, as an Array of **already-deserialized** field
+Hashes (one for the child's own inference metadata, one per producer
+reference). These receipts are provenance evidence, not parent-chat
+messages: the child's inference metadata and producer job reference are read
+from the paired tool output and never injected into the parent chat. Provenance
+tooling consumes them through `Chat.agent_meta_evidence` and the `:agent_job`
+relation; see [Provenance.md](Provenance.md) for the extraction, precedence
+(current `meta` over legacy `agent_meta`), and accounting rules.
 
 ---
 
