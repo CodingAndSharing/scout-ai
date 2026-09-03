@@ -6,3 +6,20 @@ pkg
 chats
 __pycache__
 tmp
+
+.env
+sandbox
+archived
+venv
+data_samples
+README_dev.md
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+Dockerfile
+.gitattributes
+
+.github/skills
+pixi.toml
