@@ -1,0 +1,104 @@
+# Scout-AI — container topology.
+#
+# The Dockerfile says how the image is built; this file says how it is run: which
+# volumes carry state, which ports are published, and how the CLI reaches Ollama.
+# Every service shares one image, so `docker compose build` once covers all of them.
+#
+#   docker compose run --rm cli llm ask "What is the capital of France?"
+#   docker compose run --rm cli agent ask Greeter "Hi, I'm Alice!"
+#   docker compose --profile server up                  # browser UI on :4567
+#   docker compose --profile ollama up -d ollama        # key-free local models
+#   docker compose run --rm test                        # offline unit suite
+#   docker compose run --rm dev llm ask -d -c chats/hello.chat   # live source
+
+x-scout-common: &scout-common
+  build:
+    context: .
+  image: scout-ai:local
+  # Anything in ./.env is injected into the container (Compose >= 2.24 for
+  # `required: false`). That is the recommended place for keys: .env is
+  # gitignored and dockerignored, so secrets stay out of git and out of images.
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    # Explicit passthrough of what Scout-AI actually reads, for when you export
+    # in your shell instead of using .env. NOTE the names: scout-ai reads
+    # <BACKEND>_KEY (OPENAI_KEY, ANTHROPIC_KEY, …), NOT OPENAI_API_KEY.
+    OPENAI_KEY: ${OPENAI_KEY:-}
+    ANTHROPIC_KEY: ${ANTHROPIC_KEY:-}
+    OPENROUTER_KEY: ${OPENROUTER_KEY:-}
+    HF_TOKEN: ${HF_TOKEN:-}
+    # The anthropic gem itself falls back to this one, so it works too.
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  volumes:
+    # The whole Scout state directory: endpoint YAMLs, saved chats, agent dirs,
+    # workflow job caches, provenance. Drop this and every run starts from zero.
+    - scout-state:/root/.scout
+    # Chat files you edit on the host. `llm ask -c` appends the reply in place.
+    - ./chats:/work/chats
+  networks: [scout]
+
+services:
+  # One-shot CLI. Anything after the service name is appended to `scout-ai`.
+  cli:
+    <<: *scout-common
+    profiles: ["cli"]
+    working_dir: /work
+
+  # The Sinatra chat UI. It binds 127.0.0.1 by default, which is unreachable from
+  # outside the container — SCOUT_BIND is what makes the published port work.
+  server:
+    <<: *scout-common
+    profiles: ["server"]
+    command: ["llm", "server"]
+    environment:
+      OPENAI_KEY: ${OPENAI_KEY:-}
+      ANTHROPIC_KEY: ${ANTHROPIC_KEY:-}
+      OPENROUTER_KEY: ${OPENROUTER_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SCOUT_BIND: 0.0.0.0
+      SCOUT_PORT: "4567"
+    ports:
+      - "${SCOUT_PORT:-4567}:4567"
+
+  # Live source, no rebuild: the checkout is bind-mounted over /app while the conda
+  # environment stays in /opt/env. Edit lib/ on the host, rerun, see the change.
+  dev:
+    <<: *scout-common
+    profiles: ["dev"]
+    volumes:
+      - scout-state:/root/.scout
+      - ./:/app
+
+  # Offline unit suite. No scout-state volume and a throwaway HOME on purpose:
+  # a dirty ~/.scout produces false failures (README_dev §2.2.6 / audit #20).
+  test:
+    <<: *scout-common
+    profiles: ["test"]
+    entrypoint: ["pixi", "run", "--manifest-path", "/opt/env/pixi.toml", "rake", "test"]
+    command: []
+    environment:
+      HOME: /tmp/scout-test-home
+    volumes:
+      - ./:/app
+
+  # Key-free local inference. Reachable from the other services as
+  # http://ollama:11434 — no /v1 suffix, see README_dev audit #16. Point an endpoint
+  # at it with:  backend: ollama / model: llama3.2:3b / url: http://ollama:11434
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    networks: [scout]
+
+volumes:
+  scout-state:
+  ollama-models:
+
+networks:
+  scout:

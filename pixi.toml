@@ -1,0 +1,61 @@
+[workspace]
+authors = [
+  "Mikisvaz <miguel.vazquez.g@bsc.es>",
+  "David Duenas <david.duenas@bsc.es>",
+  "Koryna <onlyfordevelopingandsharing@outlook.com>",
+]
+name = "scout-ai"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+version = "0.1.0"
+
+[dependencies]
+ruby         = "<4"        # resolves to 3.4.x; the gemspec floor is 3.0
+make         = "*"
+pkg-config   = "*"
+git          = "*"
+python       = "3.12.*"    # pycall bridge (scout-rig)
+pandas       = "*"         # imported by scout-rig's python/scout/__init__.py
+numpy        = "*"
+tokyocabinet = "*"         # KB persistence (the `tokyocabinet` gem links against it)
+zlib         = "*"
+bzip2        = "*"
+
+# The compiler MUST stay below GCC 14 / clang 16 — see the note in §2.2.2 of README_dev.
+[target.linux-64.dependencies]
+gcc = "13.*"
+gxx = "13.*"
+
+[target.linux-aarch64.dependencies]
+gcc = "13.*"
+gxx = "13.*"
+
+[target.osx-arm64.dependencies]
+cxx-compiler = "*"         # clang on macOS; untested, see §2.2.1
+
+[tasks]
+# Gems install into .pixi/envs/default/share/rubygems, so `pixi clean` drops them:
+# this task puts them back. $CONDA_PREFIX is the activated pixi environment.
+#
+# scout-gear is NOT a transitive dependency of scout-ai (scout-rig only depends on
+# pycall), so it has to be named explicitly. The >= 10.13.0 floor is the release that
+# added Workflow::TYPE_EXTENSIONS, which lib/scout/llm/chat/persist.rb:25 requires.
+bootstrap = """
+gem install --no-document -v '>= 10.13.0' scout-gear &&
+gem install --no-document scout-ai &&
+gem install --no-document anthropic aws-sdk-bedrockruntime rest-client sinatra mcp method_source fc &&
+gem install --no-document tokyocabinet -- --with-tokyocabinet-dir=$CONDA_PREFIX &&
+gem install --no-document rbbt-util juwelier rake test-unit
+"""
+
+# Run the CLI from THIS checkout rather than the installed gem.
+cli = "./bin/scout-ai"
+
+# Offline unit suite (mocked backends, never hits the network).
+test = "rake test"
+
+# Same suite against a throwaway state directory. The tests persist through the real
+# Scout machinery, so a stale ~/.scout produces false failures that look like code
+# bugs — see README_dev §2.2.6 / audit #20. Use this one when a test result surprises
+# you, and in CI. tmp/ is already gitignored.
+test-clean = "mkdir -p tmp/test-home && HOME=$(pwd)/tmp/test-home rake test"
