@@ -2,35 +2,48 @@
 #
 # The Dockerfile says how the image is built; this file says how it is run: which
 # volumes carry state, which ports are published, and how the CLI reaches Ollama.
-# Every service shares one image, so `docker compose build` once covers all of them.
+# Every service shares one image, so one build covers all of them.
 #
-#   docker compose run --rm cli llm ask "What is the capital of France?"
-#   docker compose run --rm cli agent ask Greeter "Hi, I'm Alice!"
-#   docker compose --profile server up                  # browser UI on :4567
+#   docker compose build                                # builds scout-ai:local
+#   docker compose run --rm cli llm ask "Hello"
 #   docker compose --profile ollama up -d ollama        # key-free local models
-#   docker compose run --rm test                        # offline unit suite
-#   docker compose run --rm dev llm ask -d -c chats/hello.chat   # live source
+#   docker compose --profile server up                  # browser UI on :4567
+#   docker compose --profile test run --rm test         # offline unit suite
+#   docker compose --profile dev run --rm dev llm ask -d -c chats/hello.chat
+#
+# NOTE: services behind a `profiles:` key are invisible to plain `docker compose
+# build` / `up`. `cli` deliberately has no profile so that a bare
+# `docker compose build` produces the shared image; the rest are opt-in.
+
+# What Scout-AI reads from the environment. Names matter: it resolves
+# <BACKEND>_KEY / <BACKEND>_URL / <BACKEND>_MODEL — OPENAI_API_KEY is read by
+# nothing (README_dev §2.3.1, audit #21).
+x-scout-env: &scout-env
+  # Credentials
+  OPENAI_KEY: ${OPENAI_KEY:-}
+  ANTHROPIC_KEY: ${ANTHROPIC_KEY:-}
+  OPENROUTER_KEY: ${OPENROUTER_KEY:-}
+  HF_TOKEN: ${HF_TOKEN:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}   # the anthropic gem's own fallback
+  # Which model answers, without touching any YAML. Set these in .env.
+  LLM_BACKEND: ${LLM_BACKEND:-}               # ollama | openai | anthropic | …
+  ASK_ENDPOINT: ${ASK_ENDPOINT:-}             # …or name an ~/.scout/etc/AI/<name>.yaml
+  OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+  OPENAI_MODEL: ${OPENAI_MODEL:-}
+  ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
 
 x-scout-common: &scout-common
   build:
     context: .
   image: scout-ai:local
-  # Anything in ./.env is injected into the container (Compose >= 2.24 for
-  # `required: false`). That is the recommended place for keys: .env is
-  # gitignored and dockerignored, so secrets stay out of git and out of images.
+  # Everything in ./.env is injected into the container (Compose >= 2.24 for
+  # `required: false`). .env is gitignored and dockerignored, so secrets stay
+  # out of git and out of images.
   env_file:
     - path: .env
       required: false
-  environment:
-    # Explicit passthrough of what Scout-AI actually reads, for when you export
-    # in your shell instead of using .env. NOTE the names: scout-ai reads
-    # <BACKEND>_KEY (OPENAI_KEY, ANTHROPIC_KEY, …), NOT OPENAI_API_KEY.
-    OPENAI_KEY: ${OPENAI_KEY:-}
-    ANTHROPIC_KEY: ${ANTHROPIC_KEY:-}
-    OPENROUTER_KEY: ${OPENROUTER_KEY:-}
-    HF_TOKEN: ${HF_TOKEN:-}
-    # The anthropic gem itself falls back to this one, so it works too.
-    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  environment: *scout-env
   volumes:
     # The whole Scout state directory: endpoint YAMLs, saved chats, agent dirs,
     # workflow job caches, provenance. Drop this and every run starts from zero.
@@ -40,10 +53,10 @@ x-scout-common: &scout-common
   networks: [scout]
 
 services:
-  # One-shot CLI. Anything after the service name is appended to `scout-ai`.
+  # One-shot CLI, and the service `docker compose build` builds. Anything after
+  # the service name is appended to `scout-ai`.
   cli:
     <<: *scout-common
-    profiles: ["cli"]
     working_dir: /work
 
   # The Sinatra chat UI. It binds 127.0.0.1 by default, which is unreachable from
@@ -53,11 +66,7 @@ services:
     profiles: ["server"]
     command: ["llm", "server"]
     environment:
-      OPENAI_KEY: ${OPENAI_KEY:-}
-      ANTHROPIC_KEY: ${ANTHROPIC_KEY:-}
-      OPENROUTER_KEY: ${OPENROUTER_KEY:-}
-      HF_TOKEN: ${HF_TOKEN:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      <<: *scout-env
       SCOUT_BIND: 0.0.0.0
       SCOUT_PORT: "4567"
     ports:
@@ -85,8 +94,8 @@ services:
       - ./:/app
 
   # Key-free local inference. Reachable from the other services as
-  # http://ollama:11434 — no /v1 suffix, see README_dev audit #16. Point an endpoint
-  # at it with:  backend: ollama / model: llama3.2:3b / url: http://ollama:11434
+  # http://ollama:11434 — no /v1 suffix, see README_dev audit #16. That URL is
+  # already the default of OLLAMA_URL above.
   ollama:
     image: ollama/ollama:latest
     profiles: ["ollama"]
