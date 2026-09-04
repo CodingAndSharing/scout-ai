@@ -20,6 +20,7 @@ numpy        = "*"
 tokyocabinet = "*"         # KB persistence (the `tokyocabinet` gem links against it)
 zlib         = "*"
 bzip2        = "*"
+graphviz     = "*"        # `scout-ai llm prov --plot` shells out to `dot`
 
 # The compiler MUST stay below GCC 14 / clang 16 — see the note in §2.2.2 of README_dev.
 [target.linux-64.dependencies]

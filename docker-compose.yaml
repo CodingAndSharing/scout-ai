@@ -44,6 +44,9 @@ x-scout-common: &scout-common
     - path: .env
       required: false
   environment: *scout-env
+  # Scout resolves ./chats from the working directory, and `llm server` serves
+  # exactly ./chats — so both must sit where the host volume is mounted.
+  working_dir: /work
   volumes:
     # The whole Scout state directory: endpoint YAMLs, saved chats, agent dirs,
     # workflow job caches, provenance. Drop this and every run starts from zero.
@@ -57,7 +60,6 @@ services:
   # the service name is appended to `scout-ai`.
   cli:
     <<: *scout-common
-    working_dir: /work
 
   # The Sinatra chat UI. It binds 127.0.0.1 by default, which is unreachable from
   # outside the container — SCOUT_BIND is what makes the published port work.
@@ -77,6 +79,7 @@ services:
   dev:
     <<: *scout-common
     profiles: ["dev"]
+    working_dir: /app
     volumes:
       - scout-state:/root/.scout
       - ./:/app
@@ -88,6 +91,7 @@ services:
     profiles: ["test"]
     entrypoint: ["pixi", "run", "--manifest-path", "/opt/env/pixi.toml", "rake", "test"]
     command: []
+    working_dir: /app
     environment:
       HOME: /tmp/scout-test-home
     volumes:
