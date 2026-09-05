@@ -18,7 +18,7 @@ The structural relations are:
 | Parent | Relation | Child | Meaning |
 |---|---|---|---|
 | chat | `job` | job | A projected response was produced by a Workflow job. |
-| chat | `agent_job` | job | A delegated tool call returned an agent whose `job=` receipt names the producer job. |
+| chat | `agent_job` | job | A delegated tool call returned an agent whose receipt entry carries a `job` field naming the producer job. |
 | job | `dependency` | job | A normal Scout Workflow dependency. |
 | job | `log` | chat | A persisted agent conversation under `.files/*.chat`, `.files/*.society/**/*.chat`, or the legacy `.files/log/**/*.chat`. |
 | chat | `log` | chat | A saved agent conversation under the chat's own `.files` sidecar, same three families (root copy excluded). |
@@ -195,10 +195,12 @@ Two receipt formats exist, and the reader accepts both:
 - **Current format — the `meta` key.** The writer deserializes the child agent's `meta` messages (`LLM.meta_receipt_from_messages`) and emits an Array of plain field Hashes, each already parsed:
 
   ```
-  function_call_output: {"name":"ask","content":"child answer","id":"call_1","meta":[{"pt":100,"ct":50,"tt":150,"inference_id":"aaa"},{"job":"Worker/ask/Default_x"}]}
+  function_call_output: {"name":"ask","content":"child answer","id":"call_1","meta":[{"pt":100,"ct":50,"tt":150,"inference_id":"aaa"},{"job":"Cortex/continue/Default_x.chat"}]}
   ```
 
-  An entry carries either the child's direct inference metadata (`pt`, `ct`, `tt`, ..., `inference_id`) or a producer reference (`job=<path>` as a field). Entries that would carry no fields are dropped by the writer.
+  An entry carries either the child's direct inference metadata (`pt`, `ct`, `tt`, ..., `inference_id`) or a producer reference: a `job` key holding the child job path, e.g. `{"job":"Cortex/continue/Default_x.chat"}`. Job references may be job-typed or chat-typed paths; both resolve to a Step. Entries that would carry no fields are dropped by the writer.
+
+  The same `function_call_output` may also carry auxiliary fields next to the receipt: `step` (the producing step of the same execution), `start_timestamp`, and `timestamp`. They are bookkeeping only: the sole receipt-driven provenance edge source is the `job` field of a receipt entry (`meta[].job`); the `step` field is never followed as a parent-child edge.
 
 - **Legacy format — the `agent_meta` key.** Older data stores serialized meta messages:
 
@@ -235,7 +237,7 @@ Malformed warnings mirror the persisted key in their `evidence_address`, and alw
 
 ### The `agent_job` relation
 
-`Chat::PROVENANCE_RELATIONS` includes `agent_job`: chat to delegated producer job, resolved from `job=` receipts. The child is a normal Step and follows `dependency`, `log`, and `result` as usual. A job reference whose Step path and `.info` sidecar both do not exist is not followed and is reported instead.
+`Chat::PROVENANCE_RELATIONS` includes `agent_job`: chat to delegated producer job, resolved from the `job` field of receipt entries (`meta[].job`; the auxiliary `step` field on the tool output is not an edge source). The child is a normal Step and follows `dependency`, `log`, and `result` as usual. A job reference whose Step path and `.info` sidecar both do not exist is not followed and is reported instead.
 
 Diagnostics go through `Chat.provenance_error` with relation `:agent_job`; the error itself is a plain `ScoutException` whose message is built by `Chat.agent_meta_error_message`, and every structured fact (enclosing chat path, tool output address, receipt address, call id, tool name, malformed entry, reference, reason) travels in the `on_error` reference Hash. In strict mode (no `on_error`) a malformed receipt raises; with `on_error` each problem is reported once per receipt, while the rest of the chat's provenance still expands. Only output JSON that parses to a Hash carrying an explicit receipt key (current `meta`, legacy `agent_meta`) is ever inspected: unparseable tool outputs are never scanned for the substring `agent_meta`.
 
@@ -252,6 +254,8 @@ Deduplication happens exactly once, inside this collector: chat-side records are
 A missing `provider_response_id` in one evidence record and a present one in another is *incomplete evidence*, not a conflict: such events set `incomplete_evidence: true`, are counted normally, and never trigger conflict warnings. Only two different non-empty `provider_response_id` values (or disagreement on `pt`/`ct`/`tt`) conflict. A conflicting event still contributes its canonical tokens, so any total containing conflicts is best-effort, not authoritative; `Chat.provenance_token_totals(root, conflicts: hash)` reports that flag explicitly.
 
 `Chat.provenance_token_totals(root, scope:)` sums event tokens by scope. Scopes are **evidence coverage**, not a partition of cost: an event stored both in a saved child log and in a receipt belongs to `:chat_evidence` and to `:receipt_evidence`, so those two must never be summed together. `:deduplicated_total` (default) counts every event once and `:receipt_only` is the disjoint delegated contribution with no saved-chat evidence. `Chat.tokens(root)` delegates to the collector, so provenance aggregates include receipt-only child usage without double counting when the same child inference is also persisted in a job.
+
+Detailed usage fields come from `Chat.normalize_usage` through `USAGE_FIELD_MAP`, which currently recognizes the OpenAI/Glm/Anthropic spellings present in the map. The map is the inclusivity boundary: a provider that reports cache or reasoning numbers under a spelling the map does not list yields an event whose `cct`/`cwt`/`rt` stay nil, so the renderer omits `cache=`-axis detail for it while `pt`/`ct`/`tt` still count. The short keys are the prov vocabulary (`pt`/`ct`/`tt`/`cct`/`cwt`/`rt`); provider field names never appear in prov output.
 
 ## Workflow failures and partial provenance
 
@@ -279,7 +283,13 @@ Root classification uses the `.info` sidecar only: a path is a job iff `<path>.i
 
 The default tree is a spanning-tree presentation of a DAG. Repeated nodes are displayed as seen references rather than recursively expanded. Compact and graphical flows choose natural data-flow arrow direction during rendering without changing traversal semantics.
 
-Job token values describe direct chat logs owned by that job. They do not silently include the complete dependency subtree.
+Default-tree numbers are labelled `evidence=`: each node carries the subtree-deduplicated evidence closure of everything reachable from it, so sibling and ancestor lines overlap and the values must never be read as per-part cost (continuation carriers make closures cumulative as well). Job nodes add `delta=`: the direct token totals of the job's persisted chat-typed result (`Chat.job_result_chat_file`), which is exactly the receipts-defined accounting delta for that delegated part; jobs whose result is not a saved chat omit the field; `delta=` is printed in both modes, because in `--component` the `direct=`/`delta=` contrast on one line is the very question the mode answers. Per-job `delta=` values sum to the root total on continuation chains but not on general DAGs (a job whose result is re-sent to several parents is one logical delta, not several).
+
+Both modes end with a `root deduplicated_total=` footer: `root deduplicated_total=<tt> (<N> events) prompt=... cache=<abs>@<rate>% fresh=... [cache_write=...] cont=... reason=... (authoritative cost; per-node evidence=/direct= values overlap)`, reusing the already-computed root closure, followed by the identity-conflict caveat line whenever conflicts make it non-authoritative (that footer caveat is the single home of the conflict warning; the `--component` scope block does not repeat it). The event count lives in the footer, not on the root node line. `--component` relabels the per-node numbers `direct=` (own direct logs, still not per-part cost on continuation carriers).
+
+The prompt axis is contiguous and uses one canonical field order in node lines and the footer: qualifier total, `[delta=]`, `prompt=`, `cache=<abs>@<rate>`, `[fresh=]`, `[cache_write=]`, `cont=`, `reason=`. `cache=` is the cache-hit share of prompt (`cct`, summed over the events behind the figure) printed as `cache=<absolute>@<rate>%`, with the rate computed as `100.0 * cct / pt` from the raw integer totals and formatted `%.1f`; it prints whenever `pt > 0`, including `cache=0@0.0%` (a run with no provider cache data at all). When `pt` is nil or 0 the whole prompt axis is omitted. Node lines carry the compact form; the footer additionally carries `fresh=` (`pt - cct` raw, the prompt tokens not served from cache, which includes the cache-write portion) and `cache_write=` (`cwt`, Anthropic cache-write tokens; printed only when positive). Because conflicting evidence sums can yield `cct > pt`, the raw ratio may exceed 100%; the renderer prints whatever the raw ratio gives instead of clamping, and the conflict caveat line is the guard that marks such a figure best-effort.
+
+The bare unqualified `total=` printed inside `--component` scope lines and `--evidence` rows is retained deliberately as coverage-line vocabulary: it is never summed and is not a cost figure.
 
 Delegated calls are reported from receipts (current `meta` key or legacy `agent_meta` key; both formats are accepted transparently). The tree labels a job reached through a receipt as `delegated-job`, adds one `delegated receipt: N events, total=<tt>, <tools>` annotation line under chats that carry receipts, and `--component` prints `scope local:` / `scope receipt:` / `scope aggregate:` lines when receipt evidence exists. Flow and DOT render receipt edges as `delegated_result`.
 

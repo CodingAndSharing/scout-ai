@@ -45,6 +45,77 @@ class TestChatAgentMetaProvenance < Test::Unit::TestCase
     end
   end
 
+  ## Envelope variants (current `meta` key) and repeated references ##
+
+  # The current envelope writes receipts under the `meta` key of the
+  # function_call_output payload instead of the legacy `agent_meta` array.
+  # Both must yield :agent_job edges from the enclosing chat.
+  def test_current_meta_envelope_receipt_yields_agent_job_edge
+    TmpFile.with_dir do |dir|
+      child = make_job(dir, 'Cortex/continue/Default_cur.chat')
+      parent = write_chat(dir, 'parent.chat',
+                          receipt_chat_text({'a1' => [{'job' => child}]},
+                                            envelope: :meta))
+
+      errors = []
+      visits = Chat.traverse_provenance(parent, on_error: ->(*args) { errors << args }).to_a
+
+      assert_empty errors
+      signature = visit_signature(visits)
+      edge = signature.find { |_kind, path, relation, _first| relation == :agent_job && path == child }
+      assert edge, "no :agent_job edge to #{child} in #{signature.inspect}"
+      assert_equal :job, edge[0]
+    end
+  end
+
+  # Job references recorded by chat_task point at the .chat result file
+  # (e.g. Cortex/continue/Default_x.chat); resolution must work for them too.
+  def test_chat_typed_job_reference_resolves
+    TmpFile.with_dir do |dir|
+      child = make_job(dir, 'Cortex/continue/Default_x.chat')
+      parent = write_chat(dir, 'parent.chat',
+                          receipt_chat_text({'a1' => [{'job' => child}]},
+                                            envelope: :meta))
+
+      errors = []
+      visits = Chat.traverse_provenance(parent, on_error: ->(*args) { errors << args }).to_a
+
+      assert_empty errors
+      signature = visit_signature(visits)
+      assert signature.any? { |_kind, path, relation, _first| relation == :agent_job && path == child },
+             signature.inspect
+    end
+  end
+
+  # Several continuations of one conversation report the SAME child job ref
+  # from one parent (the user-visible case: three Cortex/continue calls).
+  # Each receipt keeps its own edge and detail, the child node expands once.
+  def test_repeated_job_references_keep_distinct_edges_and_expand_once
+    TmpFile.with_dir do |dir|
+      child = make_job(dir, 'Cortex/continue/Default_dup.chat')
+      receipt = [{'job' => child}]
+      parent = write_chat(dir, 'parent.chat',
+                          receipt_chat_text({'a1' => receipt, 'a2' => receipt, 'a3' => receipt},
+                                            envelope: :meta))
+
+      errors = []
+      visits = Chat.traverse_provenance(parent, on_error: ->(*args) { errors << args }).to_a
+
+      assert_empty errors
+      delegated = visits.select { |v| v[4] == :agent_job }
+      assert_equal 3, delegated.length, 'each receipt keeps its own edge'
+      delegated.each_with_index do |visit, i|
+        assert_equal child, visit[1].path.to_s
+        assert_equal "a#{i + 1}", visit[6][:call_id], 'edge detail keeps the originating call id'
+      end
+      assert_equal [true, false, false], delegated.collect { |v| v[5] },
+                   'only the first visit expands the child node'
+      # Three edges to the SAME job node are structural: only the first one
+      # expands it (visit count 3, single expansion flag set).
+      assert_equal 3, visits.count { |kind, object, *_| kind == :job && object.path.to_s == child }
+    end
+  end
+
   def test_follow_job_excludes_the_agent_job_edge
     TmpFile.with_dir do |dir|
       parent, _worker, _critic, _dep = fixture_c(dir)
@@ -447,6 +518,68 @@ TXT
   end
 
   ## Regression
+
+  ## Reviewer pins: no tool-name gating on the :agent_job edge
+
+  # The edge exists for ANY tool whose function_call_output envelope carries a
+  # meta[].job receipt; the function name is irrelevant to accounting.  Proven
+  # by fabricating a tool name that is not a scout-ai task (`not_ask`) and by
+  # reusing the names of the receipt-producing workflows (`cortex_continue`,
+  # `cortex_brief`) on a non-delegating envelope as a negative control.
+  def test_agent_job_edge_under_arbitrary_tool_names
+    TmpFile.with_dir do |dir|
+      child = make_job(dir, 'Cortex/continue/Default_tn.chat')
+
+      %w[not_ask cortex_continue cortex_brief].each do |tool|
+        parent = write_chat(dir, "parent_#{tool}.chat",
+                            receipt_chat_text({'a1' => [{'job' => child}]},
+                                              envelope: :meta, tool: tool))
+        signature = visit_signature(Chat.traverse_provenance(parent).to_a)
+        assert signature.any? { |_kind, path, relation, _first|
+          relation == :agent_job && path == child
+        }, "no :agent_job edge for tool #{tool}: #{signature.inspect}"
+      end
+
+      # Negative control: same tool names, envelope without a job receipt ->
+      # no edge, so the edge follows the receipt, not the name.
+      %w[not_ask cortex_continue cortex_brief].each do |tool|
+        parent = write_chat(dir, "plain_#{tool}.chat",
+                            receipt_chat_text({'a1' => [{'role' => 'meta',
+                                                         'content' => 'ok'}]},
+                                              envelope: :meta, tool: tool))
+        signature = visit_signature(Chat.traverse_provenance(parent).to_a)
+        assert_empty signature.select { |_kind, _path, relation, _first| relation == :agent_job },
+                     "unexpected :agent_job edge for tool #{tool}"
+      end
+    end
+  end
+
+  # Structural double check: the provenance source contains no conditional on
+  # a function/tool name anywhere in the receipt lifting path.  The check
+  # looks for gating CONSTRUCTS around the tool name (==/match/case), not for
+  # the bare word, because `tool_name` is legitimately recorded as evidence
+  # detail.
+  def test_no_tool_name_conditional_in_provenance_sources
+    source = File.read(File.expand_path('../../../../lib/scout/llm/chat/provenance.rb', __dir__))
+    # 1. no equality/matching test between the name and a literal tool name
+    %w[ask cortex_continue cortex_brief not_ask].each do |name|
+      ["tool_name == :#{name}",
+       "tool_name.to_s == '#{name}'",
+       "tool_name == '#{name}'",
+       "name == '#{name}'",
+       "tool_name =~ /#{name}/",
+       "'name' => '#{name}'"].each do |pattern|
+        assert_not_include source, pattern,
+                           "tool-name conditional #{pattern.inspect} leaked into provenance traversal"
+      end
+    end
+    # 2. no case/when branch on the name at all
+    assert_not_match(/^\s*case\s+(\S*tool_name|name)\s*$/, source)
+    # 3. the word only appears as evidence detail, never as a value compared
+    #    (the literal name recorded by callers lives in test fixtures, not here)
+    assert_not_include source, "tool_name =='", source
+    assert_not_include source, 'tool_name==', source
+  end
 
   def test_provenance_relations_include_agent_job_and_not_import
     assert_equal %i[job dependency log result agent_job], Chat::PROVENANCE_RELATIONS

@@ -95,28 +95,99 @@ module Chat
     [kind.to_sym, provenance_path(kind, object)]
   end
 
+  # ------------------------------------------------------------------
+  # Run-scoped, parse-once chat cache (review theme 04, stage s1)
+  # ------------------------------------------------------------------
+  # A provenance "run" is one top-level call to a public provenance entry
+  # point (traverse_provenance, provenance_token_events,
+  # provenance_token_totals / tokens, and the collectors delegating to them).
+  # Inside a run every chat file is parsed at most once, keyed by the same
+  # realpath discipline as node identity (provenance_path), so a file reached
+  # through several addresses - symlinks, or a chat-typed job whose result
+  # path equals a chat node path - is parsed once and never double counted.
+  #
+  # Guards:
+  #   * lifetime: the cache exists only while a run is active and is dropped
+  #     when it ends, so a live session that appends between two runs is
+  #     always re-parsed (no cross-run persistence);
+  #   * identity: realpath keyed, exactly like provenance nodes;
+  #   * transparency: no envelope shape, traversal order or deduplication
+  #     semantics change - the same Chat object is simply reused within the
+  #     run, and everything downstream only reads it.
+  def self.with_provenance_run_cache
+    previous = Thread.current[:scout_ai_provenance_run_cache]
+    Thread.current[:scout_ai_provenance_run_cache] ||= {}
+    begin
+      yield
+    ensure
+      Thread.current[:scout_ai_provenance_run_cache] = previous
+    end
+  end
+
+  # Manual scope control for linear, top-level callers such as the `prov`
+  # SOPT script, whose body cannot be wrapped in a block without reindenting
+  # the whole file.  Open at the start of the run, close when it ends; an
+  # open scope makes nested with_provenance_run_cache calls reuse it.
+  def self.open_provenance_run_cache
+    Thread.current[:scout_ai_provenance_run_cache] ||= {}
+  end
+
+  def self.close_provenance_run_cache
+    Thread.current[:scout_ai_provenance_run_cache] = nil
+  end
+
+  # Chat.load with the run cache applied.  Outside a run this parses
+  # directly, exactly like Chat.load.
+  def self.provenance_chat_load(path)
+    cache = Thread.current[:scout_ai_provenance_run_cache]
+    return Chat.load(path) unless cache
+    cache[provenance_path(:chat, path)] ||= Chat.load(path)
+  end
+
   def self.provenance_error(on_error, error, kind, object, relation, reference)
     raise error unless on_error
     on_error.call(error, kind, object, relation, reference)
   end
 
+  # Candidate filesystem bases, in priority order, used to resolve a relative
+  # job reference (e.g. "Planned/ask/Default_abc.chat") when Step.load could
+  # not locate the job data: first the standard Rbbt workflow storage
+  # (~/.rbbt/var/jobs), then Scout's own workflow storage (Scout.var.jobs,
+  # normally ~/.scout/var/jobs).  Exposed as a class method so tests can point
+  # it at a tmp fixture tree instead of the real HOME.
+  def self.job_reference_fallback_bases
+    ['~/.rbbt/var/jobs', Scout.var.jobs.find.to_s].collect { |base| File.expand_path(base) }
+  end
+
+  # A reference is acceptable when the job file itself exists or its .info
+  # sidecar does (a job whose payload was cleaned but whose .info survives
+  # still carries provenance).
+  def self.job_reference_candidate?(path)
+    path = path.to_s
+    File.exist?(path) || File.exist?(path + '.info')
+  end
+
   # Resolve a job reference from a chat meta message into a Step. References
   # like "Planned/ask/Default_abc.chat" are relative workflow paths. Step.load
   # may resolve them to a Scout-specific directory that does not contain the
-  # actual job data, so we fall back to checking Rbbt.var.jobs and Scout.var.jobs.
+  # actual job data, so we fall back to the candidate bases in order.
   def self.load_job_reference(reference)
     return reference if Step === reference
     ref_str = reference.to_s
 
     step = Step.load(ref_str)
-    return step if File.exist?(step.path.to_s) || File.exist?(step.path.to_s + '.info')
+    return step if job_reference_candidate?(step.path.to_s)
 
     # Step.load resolves relative workflow paths (e.g. Planned/ask/Default_xyz.chat)
     # via Path.find, which may point to a directory that does not contain the
-    # actual job data (e.g. ~/.scout/ instead of ~/.rbbt/var/jobs/). Try the
-    # standard Rbbt workflow storage location as a fallback.
-    rbbt_candidate = File.expand_path(File.join('~/.rbbt/var/jobs', ref_str))
-    return Step.load(rbbt_candidate) if File.exist?(rbbt_candidate) || File.exist?(rbbt_candidate + '.info')
+    # actual job data (e.g. ~/.scout/ instead of ~/.rbbt/var/jobs/). Try each
+    # candidate base in priority order; the first base under which the file or
+    # its .info sidecar exists wins. Order is preserved: Step.load first, then
+    # the bases exactly as listed in job_reference_fallback_bases.
+    job_reference_fallback_bases.each do |base|
+      candidate = File.join(base, ref_str)
+      return Step.load(candidate) if job_reference_candidate?(candidate)
+    end
 
     step
   end
@@ -206,6 +277,11 @@ module Chat
   # therefore never follows import, continue, or last references.
   def self.traverse_provenance(root, root_type: nil, follow: :all, on_error: nil, &block)
     return enum_for(__method__, root, root_type: root_type, follow: follow, on_error: on_error) unless block
+    unless Thread.current[:scout_ai_provenance_run_cache]
+      return with_provenance_run_cache do
+        traverse_provenance(root, root_type: root_type, follow: follow, on_error: on_error, &block)
+      end
+    end
     # Lambda blocks have strict arity; keep six-argument callbacks compatible
     # by only yielding the trailing detail when the block can receive it.
     detail_arity = lambda do
@@ -244,7 +320,7 @@ module Chat
 
       begin
         if kind == :chat
-          chat = Chat.load(object)
+          chat = provenance_chat_load(object)
 
           if relations.include?(:job)
             chat.jobs.each do |reference|
@@ -497,6 +573,11 @@ module Chat
   #
   # Checkpoint fields (*_c, *_s) are never read or summed here.
   def self.provenance_token_events(root, warnings: nil, strict: false, **traversal_options)
+    unless Thread.current[:scout_ai_provenance_run_cache]
+      return with_provenance_run_cache do
+        provenance_token_events(root, warnings: warnings, strict: strict, **traversal_options)
+      end
+    end
     # Route traversal-stage agent_meta problems into the caller's warnings
     # Array instead of letting them raise.  Other traversal errors stay strict
     # (raise), and an explicitly supplied on_error keeps being called.
@@ -519,7 +600,7 @@ module Chat
 
     files = provenance_chat_files(root, **traversal_options)
     sources = {}
-    files.each { |file| sources[file] = Chat.load(file) }
+    files.each { |file| sources[file] = provenance_chat_load(file) }
 
     evidences = []
 
