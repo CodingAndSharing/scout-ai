@@ -38,13 +38,17 @@ cxx-compiler = "*"         # clang on macOS; untested, see §2.2.1
 # Gems install into .pixi/envs/default/share/rubygems, so `pixi clean` drops them:
 # this task puts them back. $CONDA_PREFIX is the activated pixi environment.
 #
+# `llm server` needs sinatra AND a rack handler: Sinatra 4 refuses to boot without
+# `rackup` and `puma` ("Sinatra could not start, the required gems weren't found!").
+#
 # scout-gear is NOT a transitive dependency of scout-ai (scout-rig only depends on
 # pycall), so it has to be named explicitly. The >= 10.13.0 floor is the release that
 # added Workflow::TYPE_EXTENSIONS, which lib/scout/llm/chat/persist.rb:25 requires.
 bootstrap = """
 gem install --no-document -v '>= 10.13.0' scout-gear &&
 gem install --no-document scout-ai &&
-gem install --no-document anthropic aws-sdk-bedrockruntime rest-client sinatra mcp method_source fc &&
+gem install --no-document anthropic aws-sdk-bedrockruntime rest-client mcp method_source fc &&
+gem install --no-document sinatra rackup puma &&
 gem install --no-document tokyocabinet -- --with-tokyocabinet-dir=$CONDA_PREFIX &&
 gem install --no-document rbbt-util juwelier rake test-unit
 """
@@ -59,4 +63,4 @@ test = "rake test"
 # Scout machinery, so a stale ~/.scout produces false failures that look like code
 # bugs — see README_dev §2.2.6 / audit #20. Use this one when a test result surprises
 # you, and in CI. tmp/ is already gitignored.
-test-clean = "mkdir -p tmp/test-home && HOME=$(pwd)/tmp/test-home rake test"
+test-clean = "rm -rf tmp/test-home && mkdir -p tmp/test-home && HOME=$(pwd)/tmp/test-home rake test"
